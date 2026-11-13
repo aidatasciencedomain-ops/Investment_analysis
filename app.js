@@ -244,6 +244,8 @@
       renderScreener(appContainer);
     } else if (currentRoute.startsWith('/map')) {
       renderMap(appContainer);
+    } else if (currentRoute.startsWith('/predict')) {
+      renderPrediction(appContainer);
     } else if (currentRoute.startsWith('/analyst')) {
       renderAnalyst(appContainer);
     } else if (currentRoute.startsWith('/banks/')) {
@@ -2170,6 +2172,855 @@
     leafletMapInstance.flyTo(c.center, c.zoom, { duration: 1.2 });
   }
 
+    // ==========================================
+  // VIEW: PREDICTION ANALYSIS
+  // ==========================================
+  const PREDICT_FEATURES = [
+    { key: 'roe_pct', label: 'ROE' },
+    { key: 'cet1_pct', label: 'CET1' },
+    { key: 'npl_pct', label: 'NPL' },
+    { key: 'cost_income_pct', label: 'Cost / income' },
+    { key: 'nim_pct', label: 'NIM' },
+    { key: 'loan_growth_pct', label: 'Loan growth' }
+  ];
+  let predictionActiveTab = 'single'; // 'single' | 'compare'
+  let predictionBankId = '';
+  let predictionCompareBankId = '';
+  let predictionResult = null;
+  let predictionCompareResultA = null;
+  let predictionCompareResultB = null;
+
+  window.setPredictionTab = function (tab) {
+    predictionActiveTab = tab;
+    const container = document.getElementById('app-content');
+    if (container) renderPrediction(container);
+  };
+
+  window.swapCompareBanks = function () {
+    const temp = predictionBankId;
+    predictionBankId = predictionCompareBankId;
+    predictionCompareBankId = temp;
+    const bankA = banks.find(b => b.id === predictionBankId);
+    const bankB = banks.find(b => b.id === predictionCompareBankId);
+    if (bankA && bankB) {
+      predictionCompareResultA = scorePrediction(bankA);
+      predictionCompareResultB = scorePrediction(bankB);
+    }
+    const container = document.getElementById('app-content');
+    if (container) renderPrediction(container);
+  };
+
+  function predictRmse(actual, fitted) {
+    let sum = 0;
+    for (let i = 0; i < actual.length; i++) sum += (actual[i] - fitted[i]) ** 2;
+    const degrees = Math.max(1, actual.length - PREDICT_FEATURES.length - 1);
+    return Math.sqrt(sum / degrees);
+  }
+
+  function predictIncomeGrowthTarget(bank) {
+    const volume = Number(bank.loan_growth_pct) || 0;
+    const marginGap = (Number(bank.nim_pct) || 0) - 2;
+    const guidance = Number(bank.forecast_ni_growth_pct) || 0;
+    return volume * 0.65 + marginGap * 0.25 + guidance * 0.1;
+  }
+
+  function scorePrediction(bank) {
+    const peers = banks.filter(item => item.id !== bank.id);
+    const matrix = peers.map(item => PREDICT_FEATURES.map(feature => Number(item[feature.key]) || 0));
+    const { Z, mu, sd } = mlStandardize(matrix);
+    const profitTarget = peers.map(item => Number(item.forecast_ni_growth_pct) || 0);
+    const incomeTarget = peers.map(predictIncomeGrowthTarget);
+    const profitFit = mlFitOls(Z, profitTarget);
+    const incomeFit = mlFitOls(Z, incomeTarget);
+    const raw = PREDICT_FEATURES.map(feature => Number(bank[feature.key]) || 0);
+    const x = raw.map((value, index) => (value - mu[index]) / sd[index]);
+    const dot = (beta) => beta[0] + x.reduce((sum, value, index) => sum + value * beta[index + 1], 0);
+    const profitGrowth = dot(profitFit.beta);
+    const incomeGrowth = dot(incomeFit.beta);
+    const profitError = predictRmse(profitTarget, profitFit.fitted);
+    const incomeError = predictRmse(incomeTarget, incomeFit.fitted);
+    const drivers = PREDICT_FEATURES.map((feature, index) => ({
+      label: feature.label,
+      value: x[index] * profitFit.beta[index + 1]
+    }));
+    const regionPeers = peers.filter(item => item.region === bank.region);
+    const regionGrowth = regionPeers.length
+      ? regionPeers.reduce((sum, item) => sum + (Number(item.forecast_ni_growth_pct) || 0), 0) / regionPeers.length
+      : profitTarget.reduce((sum, value) => sum + value, 0) / profitTarget.length;
+
+    return {
+      bank,
+      peers: peers.length,
+      horizon: 'FY2026',
+      profitGrowth,
+      incomeGrowth,
+      profitError,
+      incomeError,
+      profitR2: profitFit.r2,
+      incomeR2: incomeFit.r2,
+      baseline: profitFit.beta[0],
+      drivers,
+      guidance: Number(bank.forecast_ni_growth_pct) || 0,
+      regionGrowth,
+      currentIncome: Number(bank.revenue_bn) || 0,
+      currentProfit: Number(bank.net_income_bn) || 0,
+      nextIncome: (Number(bank.revenue_bn) || 0) * (1 + incomeGrowth / 100),
+      nextProfit: (Number(bank.net_income_bn) || 0) * (1 + profitGrowth / 100)
+    };
+  }
+
+  function renderPredictCompare(result) {
+    const rows = [
+      { label: 'Income', current: result.currentIncome, next: result.nextIncome },
+      { label: 'Profit', current: result.currentProfit, next: result.nextProfit }
+    ];
+    const W = 640;
+    const H = 250;
+    const pad = { l: 52, r: 16, t: 28, b: 36 };
+    const max = Math.max(...rows.flatMap(row => [row.current, row.next]), 0.01) * 1.18;
+    const groupW = (W - pad.l - pad.r) / rows.length;
+    const barW = 28;
+    const Y = value => pad.t + (1 - value / max) * (H - pad.t - pad.b);
+    const base = H - pad.b;
+    let grid = '';
+    for (let i = 0; i <= 3; i++) {
+      const value = (max / 3) * i;
+      const y = Y(value);
+      grid += `<line x1="${pad.l}" y1="${y.toFixed(1)}" x2="${W - pad.r}" y2="${y.toFixed(1)}" stroke="rgba(243,239,230,0.08)"></line>`;
+      grid += `<text x="${pad.l - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="#8d96a6" font-size="10" font-family="IBM Plex Mono, monospace">${value >= 1000 ? (value / 1000).toFixed(1) + 'T' : Math.round(value)}</text>`;
+    }
+    const bars = rows.map((row, index) => {
+      const cx = pad.l + groupW * index + groupW / 2;
+      const currentH = base - Y(row.current);
+      const nextH = base - Y(row.next);
+      const nextColor = row.next >= row.current ? '#5eead4' : '#f87171';
+      return `
+        <rect x="${(cx - barW - 4).toFixed(1)}" y="${Y(row.current).toFixed(1)}" width="${barW}" height="${currentH.toFixed(1)}" fill="#8d96a6" opacity="0.85"></rect>
+        <rect x="${(cx + 4).toFixed(1)}" y="${Y(row.next).toFixed(1)}" width="${barW}" height="${nextH.toFixed(1)}" fill="${nextColor}"></rect>
+        <text x="${(cx - barW / 2 - 4).toFixed(1)}" y="${(Y(row.current) - 6).toFixed(1)}" text-anchor="middle" fill="#c5c9d2" font-size="10" font-family="IBM Plex Mono, monospace">${formatMoney(row.current)}</text>
+        <text x="${(cx + barW / 2 + 4).toFixed(1)}" y="${(Y(row.next) - 6).toFixed(1)}" text-anchor="middle" fill="${nextColor}" font-size="10" font-family="IBM Plex Mono, monospace">${formatMoney(row.next)}</text>
+        <text x="${cx.toFixed(1)}" y="${H - 12}" text-anchor="middle" fill="#8d96a6" font-size="10" font-family="IBM Plex Mono, monospace" letter-spacing="1.2">${row.label.toUpperCase()}</text>
+      `;
+    }).join('');
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="w-full" role="img" aria-label="Current and predicted income and profit">
+        ${grid}
+        ${bars}
+        <text x="${pad.l}" y="12" fill="#8d96a6" font-size="10" font-family="IBM Plex Mono, monospace" letter-spacing="1.2">$ BILLIONS</text>
+      </svg>
+    `;
+  }
+
+  function renderPredictDrivers(result) {
+    const items = [{ label: 'Peer baseline', value: result.baseline }].concat(result.drivers);
+    const max = Math.max(...items.map(item => Math.abs(item.value)), 0.01);
+    return items.map(item => {
+      const positive = item.value >= 0;
+      const width = (Math.abs(item.value) / max) * 48;
+      return `
+        <div class="grid items-center gap-2" style="grid-template-columns: 110px 1fr 52px;">
+          <span class="text-[11px] text-muted-foreground">${mlEscape(item.label)}</span>
+          <span class="relative block h-1.5" style="background: rgba(243,239,230,0.06);">
+            <span style="position:absolute;top:0;bottom:0;${positive ? 'left:50%' : 'right:50%'};width:${width.toFixed(1)}%;background:${positive ? '#34d399' : '#f87171'};"></span>
+            <span style="position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:rgba(243,239,230,0.28);"></span>
+          </span>
+          <span class="num text-right text-[11px] ${positive ? 'text-positive' : 'text-negative'}">${positive ? '+' : ''}${item.value.toFixed(2)}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ==========================================
+  // GRAPHICAL OBSERVATIONS FOR PEER NEGOTIATION
+  // ==========================================
+
+  // Observation 1: Side-by-Side Financial Growth Trajectory (Reported vs Predicted)
+  function renderNegotiationTrajectoryChart(resA, resB) {
+    const W = 680;
+    const H = 270;
+    const pad = { l: 56, r: 20, t: 36, b: 42 };
+    const series = [
+      {
+        category: 'Revenue (Income)',
+        items: [
+          { label: resA.bank.ticker + ' Rep', val: resA.currentIncome, col: '#8d96a6', sub: 'FY25' },
+          { label: resA.bank.ticker + ' Pred', val: resA.nextIncome, col: '#d4b482', sub: 'FY26' },
+          { label: resB.bank.ticker + ' Rep', val: resB.currentIncome, col: '#627282', sub: 'FY25' },
+          { label: resB.bank.ticker + ' Pred', val: resB.nextIncome, col: '#2dd4bf', sub: 'FY26' }
+        ]
+      },
+      {
+        category: 'Net Income (Profit)',
+        items: [
+          { label: resA.bank.ticker + ' Rep', val: resA.currentProfit, col: '#8d96a6', sub: 'FY25' },
+          { label: resA.bank.ticker + ' Pred', val: resA.nextProfit, col: '#d4b482', sub: 'FY26' },
+          { label: resB.bank.ticker + ' Rep', val: resB.currentProfit, col: '#627282', sub: 'FY25' },
+          { label: resB.bank.ticker + ' Pred', val: resB.nextProfit, col: '#2dd4bf', sub: 'FY26' }
+        ]
+      }
+    ];
+
+    const allVals = series.flatMap(s => s.items.map(it => it.val));
+    const max = Math.max(...allVals, 1) * 1.22;
+    const groupW = (W - pad.l - pad.r) / series.length;
+    const barW = 24;
+    const base = H - pad.b;
+    const Y = val => pad.t + (1 - val / max) * (H - pad.t - pad.b);
+
+    let grid = '';
+    for (let i = 0; i <= 3; i++) {
+      const val = (max / 3) * i;
+      const y = Y(val);
+      grid += `<line x1="${pad.l}" y1="${y.toFixed(1)}" x2="${W - pad.r}" y2="${y.toFixed(1)}" stroke="rgba(243,239,230,0.07)"></line>`;
+      grid += `<text x="${pad.l - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="#8d96a6" font-size="9" font-family="IBM Plex Mono, monospace">${val >= 1000 ? (val / 1000).toFixed(1) + 'T' : Math.round(val)}</text>`;
+    }
+
+    const groups = series.map((s, sIdx) => {
+      const groupX = pad.l + groupW * sIdx;
+      const innerW = groupW - 24;
+      const step = innerW / s.items.length;
+      const barElements = s.items.map((it, iIdx) => {
+        const bx = groupX + 12 + step * iIdx + (step - barW) / 2;
+        const barH = Math.max(2, base - Y(it.val));
+        const by = Y(it.val);
+        return `
+          <rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW}" height="${barH.toFixed(1)}" rx="2" fill="${it.col}" opacity="0.95"></rect>
+          <text x="${(bx + barW / 2).toFixed(1)}" y="${(by - 5).toFixed(1)}" text-anchor="middle" fill="${it.col}" font-size="9" font-family="IBM Plex Mono, monospace" font-weight="600">${formatMoney(it.val)}</text>
+          <text x="${(bx + barW / 2).toFixed(1)}" y="${H - 24}" text-anchor="middle" fill="#8d96a6" font-size="8" font-family="IBM Plex Mono, monospace">${it.sub}</text>
+        `;
+      }).join('');
+
+      return `
+        ${barElements}
+        <text x="${(groupX + groupW / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="#c5c9d2" font-size="10" font-family="IBM Plex Mono, monospace" letter-spacing="1.5" font-weight="bold">${s.category.toUpperCase()}</text>
+      `;
+    }).join('');
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="w-full" role="img" aria-label="Comparative Trajectory Chart">
+        ${grid}
+        ${groups}
+        <text x="${pad.l}" y="14" fill="#8d96a6" font-size="9" font-family="IBM Plex Mono, monospace" letter-spacing="1.2">$ BILLIONS · FY25 REPORTED VS FY26 PREDICTED</text>
+      </svg>
+    `;
+  }
+
+  // Observation 2: Six-Pillar Competitive Radar / Relative Strength Chart
+  function renderNegotiationPillarsChart(resA, resB) {
+    const pillars = [
+      { label: 'ROE (Return)', a: Number(resA.bank.roe_pct) || 0, b: Number(resB.bank.roe_pct) || 0, unit: '%', max: 25, better: 'high' },
+      { label: 'CET1 (Solvency)', a: Number(resA.bank.cet1_pct) || 0, b: Number(resB.bank.cet1_pct) || 0, unit: '%', max: 22, better: 'high' },
+      { label: 'NPL (Credit Risk)', a: Number(resA.bank.npl_pct) || 0, b: Number(resB.bank.npl_pct) || 0, unit: '%', max: 5, better: 'low' },
+      { label: 'Cost / Income', a: Number(resA.bank.cost_income_pct) || 0, b: Number(resB.bank.cost_income_pct) || 0, unit: '%', max: 75, better: 'low' },
+      { label: 'Net Int. Margin', a: Number(resA.bank.nim_pct) || 0, b: Number(resB.bank.nim_pct) || 0, unit: '%', max: 6, better: 'high' },
+      { label: 'Loan Growth', a: Number(resA.bank.loan_growth_pct) || 0, b: Number(resB.bank.loan_growth_pct) || 0, unit: '%', max: 18, better: 'high' }
+    ];
+
+    return pillars.map(p => {
+      const aWins = p.better === 'high' ? p.a >= p.b : p.a <= p.b;
+      const bWins = !aWins;
+      const aPct = Math.min(100, Math.max(5, (p.a / p.max) * 100));
+      const bPct = Math.min(100, Math.max(5, (p.b / p.max) * 100));
+
+      return `
+        <div class="rounded-sm border border-border/50 bg-background/50 p-3 space-y-2">
+          <div class="flex items-center justify-between text-[11px]">
+            <span class="font-medium text-foreground">${p.label}</span>
+            <div class="flex items-center gap-3 font-mono text-[10px]">
+              <span class="${aWins ? 'text-primary font-bold' : 'text-muted-foreground'}">${resA.bank.ticker}: ${p.a}${p.unit}</span>
+              <span class="text-muted-foreground/40">vs</span>
+              <span class="${bWins ? 'text-accent font-bold' : 'text-muted-foreground'}">${resB.bank.ticker}: ${p.b}${p.unit}</span>
+            </div>
+          </div>
+          <!-- Dual Bar -->
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-[9px] uppercase tracking-wider text-primary w-8 shrink-0">${resA.bank.ticker}</span>
+              <div class="h-2 w-full rounded-full bg-secondary/80 overflow-hidden">
+                <div class="h-full bg-primary rounded-full transition-all duration-300" style="width: ${aPct}%;"></div>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-[9px] uppercase tracking-wider text-accent w-8 shrink-0">${resB.bank.ticker}</span>
+              <div class="h-2 w-full rounded-full bg-secondary/80 overflow-hidden">
+                <div class="h-full bg-accent rounded-full transition-all duration-300" style="width: ${bPct}%;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // Observation 3: Bear / Base / Bull Risk Corridor Comparison
+  function renderNegotiationScenariosChart(resA, resB) {
+    const W = 640;
+    const H = 180;
+    const pad = { l: 70, r: 30, t: 25, b: 35 };
+
+    const aBear = resA.profitGrowth - resA.profitError;
+    const aBase = resA.profitGrowth;
+    const aBull = resA.profitGrowth + resA.profitError;
+
+    const bBear = resB.profitGrowth - resB.profitError;
+    const bBase = resB.profitGrowth;
+    const bBull = resB.profitGrowth + resB.profitError;
+
+    const minX = Math.min(aBear, bBear, -5) - 3;
+    const maxX = Math.max(aBull, bBull, 10) + 3;
+    const X = v => pad.l + ((v - minX) / (maxX - minX)) * (W - pad.l - pad.r);
+
+    const zeroX = X(0);
+    const rowHeight = 44;
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="w-full" role="img" aria-label="Risk corridor chart">
+        <!-- Zero Axis line -->
+        <line x1="${zeroX.toFixed(1)}" y1="${pad.t}" x2="${zeroX.toFixed(1)}" y2="${H - pad.b}" stroke="rgba(243,239,230,0.3)" stroke-width="1.5" stroke-dasharray="3 3"></line>
+        <text x="${zeroX.toFixed(1)}" y="${pad.t - 8}" text-anchor="middle" fill="#8d96a6" font-size="9" font-family="IBM Plex Mono, monospace">0% Growth</text>
+
+        <!-- Bank A Row -->
+        <g transform="translate(0, ${pad.t + 20})">
+          <text x="${pad.l - 12}" y="4" text-anchor="end" fill="#d4b482" font-size="11" font-family="IBM Plex Mono, monospace" font-weight="bold">${resA.bank.ticker}</text>
+          <!-- Corridor Bar -->
+          <line x1="${X(aBear).toFixed(1)}" y1="0" x2="${X(aBull).toFixed(1)}" y2="0" stroke="#d4b482" stroke-width="6" stroke-linecap="round" opacity="0.45"></line>
+          <!-- Base Point -->
+          <circle cx="${X(aBase).toFixed(1)}" cy="0" r="5" fill="#d4b482"></circle>
+          <!-- Labels -->
+          <text x="${X(aBear).toFixed(1)}" y="16" text-anchor="middle" fill="#8d96a6" font-size="8" font-family="IBM Plex Mono, monospace">Bear ${aBear.toFixed(1)}%</text>
+          <text x="${X(aBase).toFixed(1)}" y="-10" text-anchor="middle" fill="#d4b482" font-size="9" font-family="IBM Plex Mono, monospace" font-weight="bold">Base ${aBase.toFixed(1)}%</text>
+          <text x="${X(aBull).toFixed(1)}" y="16" text-anchor="middle" fill="#8d96a6" font-size="8" font-family="IBM Plex Mono, monospace">Bull ${aBull.toFixed(1)}%</text>
+        </g>
+
+        <!-- Bank B Row -->
+        <g transform="translate(0, ${pad.t + 70})">
+          <text x="${pad.l - 12}" y="4" text-anchor="end" fill="#2dd4bf" font-size="11" font-family="IBM Plex Mono, monospace" font-weight="bold">${resB.bank.ticker}</text>
+          <!-- Corridor Bar -->
+          <line x1="${X(bBear).toFixed(1)}" y1="0" x2="${X(bBull).toFixed(1)}" y2="0" stroke="#2dd4bf" stroke-width="6" stroke-linecap="round" opacity="0.45"></line>
+          <!-- Base Point -->
+          <circle cx="${X(bBase).toFixed(1)}" cy="0" r="5" fill="#2dd4bf"></circle>
+          <!-- Labels -->
+          <text x="${X(bBear).toFixed(1)}" y="16" text-anchor="middle" fill="#8d96a6" font-size="8" font-family="IBM Plex Mono, monospace">Bear ${bBear.toFixed(1)}%</text>
+          <text x="${X(bBase).toFixed(1)}" y="-10" text-anchor="middle" fill="#2dd4bf" font-size="9" font-family="IBM Plex Mono, monospace" font-weight="bold">Base ${bBase.toFixed(1)}%</text>
+          <text x="${X(bBull).toFixed(1)}" y="16" text-anchor="middle" fill="#8d96a6" font-size="8" font-family="IBM Plex Mono, monospace">Bull ${bBull.toFixed(1)}%</text>
+        </g>
+
+        <text x="${pad.l}" y="${H - 6}" fill="#8d96a6" font-size="9" font-family="IBM Plex Mono, monospace">FY2026 EARNINGS SENSITIVITY RANGE (± 1 REGRESSION RMSE)</text>
+      </svg>
+    `;
+  }
+
+  // ==========================================
+  // VIEW: PREDICTION MAIN RENDERER
+  // ==========================================
+  function renderPrediction(container) {
+    const ordered = banks.slice().sort((a, b) => a.name.localeCompare(b.name));
+    if (!predictionBankId) predictionBankId = ordered[0].id;
+    if (!predictionCompareBankId) predictionCompareBankId = ordered[1]?.id || ordered[0].id;
+
+    const selectedA = ordered.find(bank => bank.id === predictionBankId) || ordered[0];
+    const selectedB = ordered.find(bank => bank.id === predictionCompareBankId) || ordered[1] || ordered[0];
+
+    // Single mode results
+    const result = predictionResult;
+    const staleSingle = result && result.bank.id !== selectedA.id;
+
+    // Compare mode results: auto calculate if not yet ready
+    if (!predictionCompareResultA || predictionCompareResultA.bank.id !== selectedA.id) {
+      predictionCompareResultA = scorePrediction(selectedA);
+    }
+    if (!predictionCompareResultB || predictionCompareResultB.bank.id !== selectedB.id) {
+      predictionCompareResultB = scorePrediction(selectedB);
+    }
+
+    container.innerHTML = `
+      <div class="mx-auto max-w-[1180px] px-5 pb-16 pt-10 sm:px-8 sm:pt-14">
+        <!-- Header -->
+        <div class="max-w-2xl">
+          <p class="font-mono text-[10px] uppercase tracking-[0.24em] text-primary">Prediction &amp; Negotiation Analysis</p>
+          <h1 class="mt-2 font-display text-[2.2rem] leading-tight text-foreground sm:text-4xl">Next-year income, profit &amp; negotiation</h1>
+          <p class="mt-3 text-[14px] leading-relaxed text-muted-foreground">
+            Machine-learning cross-sectional regression across all 42 institutions. Predict next-year income and earnings, or benchmark two banks side-by-side to discover valuation arbitrage and negotiation leverage.
+          </p>
+        </div>
+
+        <!-- TABS: Single Bank vs Peer Comparison & Negotiation -->
+        <div class="mt-8 flex border-b border-border/70">
+          <button 
+            type="button" 
+            onclick="setPredictionTab('single')" 
+            class="px-5 py-3 font-mono text-[11px] uppercase tracking-[0.16em] border-b-2 transition-colors ${predictionActiveTab === 'single' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+          >
+            Single Bank Forecast
+          </button>
+          <button 
+            type="button" 
+            onclick="setPredictionTab('compare')" 
+            class="px-5 py-3 font-mono text-[11px] uppercase tracking-[0.16em] border-b-2 transition-colors flex items-center gap-2 ${predictionActiveTab === 'compare' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+          >
+            <span>Peer Comparison &amp; Negotiation</span>
+            <span class="rounded-full bg-primary/20 text-primary text-[9px] px-2 py-0.5 font-mono font-bold tracking-wider">Compare 2 Banks</span>
+          </button>
+        </div>
+
+        ${predictionActiveTab === 'single' ? `
+          <!-- SINGLE BANK FORM -->
+          <form id="predict-form" class="mt-8 flex flex-col gap-3 rounded-sm border border-border bg-card/40 p-4 sm:flex-row sm:items-end">
+            <label class="block flex-1">
+              <span class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Banking company</span>
+              <select id="predict-bank" class="custom-select mt-2 w-full">
+                ${ordered.map(bank => `<option value="${bank.id}" ${bank.id === selectedA.id ? 'selected' : ''}>${mlEscape(bank.name)} · ${mlEscape(bank.ticker)}</option>`).join('')}
+              </select>
+            </label>
+            <button type="submit" class="rounded-sm bg-primary px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.16em] text-primary-foreground">
+              Predict ${mlEscape(selectedA.name)}
+            </button>
+          </form>
+
+          <div id="predict-results" class="mt-8">
+            ${result ? renderPredictionResults(result, staleSingle) : `
+              <div class="rounded-sm border border-dashed border-border px-6 py-14 text-center">
+                <p class="font-display text-2xl text-foreground">No prediction yet</p>
+                <p class="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-muted-foreground">Select a banking company, then run the model. The result covers FY2026 revenue and net income, with a bear, base and bull range.</p>
+              </div>
+            `}
+          </div>
+        ` : `
+          <!-- PEER COMPARISON & NEGOTIATION FORM -->
+          <form id="predict-compare-form" class="mt-8 rounded-sm border border-border bg-card/40 p-5 space-y-4">
+            <div class="flex items-center justify-between border-b border-border/40 pb-3">
+              <div>
+                <p class="font-mono text-[10px] uppercase tracking-wider text-primary font-bold">Counterparty Selection</p>
+                <p class="text-[12px] text-muted-foreground">Select two institutions to evaluate comparative earnings trajectories and negotiation leverage.</p>
+              </div>
+              <button type="button" onclick="swapCompareBanks()" class="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors border border-border/70 rounded-xs px-2.5 py-1 bg-background/40">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 16-4-4 4-4m10 8 4-4-4-4M3 12h18"/></svg>
+                Swap Banks
+              </button>
+            </div>
+
+            <div class="grid gap-4 sm:grid-cols-2">
+              <!-- Bank A -->
+              <div class="rounded-sm border border-primary/40 bg-background/50 p-3.5 space-y-2">
+                <span class="font-mono text-[9px] uppercase tracking-wider text-primary font-bold flex items-center gap-1.5">
+                  <span class="h-2 w-2 rounded-full bg-primary"></span>
+                  Primary / Target Bank (A)
+                </span>
+                <select id="predict-bank-a" class="custom-select w-full text-[13px]">
+                  ${ordered.map(bank => `<option value="${bank.id}" ${bank.id === selectedA.id ? 'selected' : ''}>${mlEscape(bank.name)} (${mlEscape(bank.ticker)}) · ${bank.country}</option>`).join('')}
+                </select>
+                <div class="flex justify-between text-[11px] text-muted-foreground pt-1 border-t border-border/30">
+                  <span>Assets: <strong class="text-foreground">${formatMoney(selectedA.total_assets_bn)}</strong></span>
+                  <span>CET1: <strong class="text-foreground">${selectedA.cet1_pct}%</strong></span>
+                  <span>P/E: <strong class="text-foreground">${selectedA.pe_ratio}x</strong></span>
+                </div>
+              </div>
+
+              <!-- Bank B -->
+              <div class="rounded-sm border border-accent/40 bg-background/50 p-3.5 space-y-2">
+                <span class="font-mono text-[9px] uppercase tracking-wider text-accent font-bold flex items-center gap-1.5">
+                  <span class="h-2 w-2 rounded-full bg-accent"></span>
+                  Comparison / Peer Bank (B)
+                </span>
+                <select id="predict-bank-b" class="custom-select w-full text-[13px]">
+                  ${ordered.map(bank => `<option value="${bank.id}" ${bank.id === selectedB.id ? 'selected' : ''}>${mlEscape(bank.name)} (${mlEscape(bank.ticker)}) · ${bank.country}</option>`).join('')}
+                </select>
+                <div class="flex justify-between text-[11px] text-muted-foreground pt-1 border-t border-border/30">
+                  <span>Assets: <strong class="text-foreground">${formatMoney(selectedB.total_assets_bn)}</strong></span>
+                  <span>CET1: <strong class="text-foreground">${selectedB.cet1_pct}%</strong></span>
+                  <span>P/E: <strong class="text-foreground">${selectedB.pe_ratio}x</strong></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex justify-end pt-2">
+              <button type="submit" class="rounded-sm bg-primary px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.16em] text-primary-foreground font-semibold hover:opacity-95 transition-opacity">
+                Run Negotiation &amp; Peer Comparison
+              </button>
+            </div>
+          </form>
+
+          <!-- COMPARISON RESULTS SECTION -->
+          <div id="predict-compare-results" class="mt-8 space-y-8">
+            ${renderPredictionComparisonResults(predictionCompareResultA, predictionCompareResultB)}
+          </div>
+        `}
+      </div>
+    `;
+
+    // Event handlers for Single form
+    const singleForm = document.getElementById('predict-form');
+    if (singleForm) {
+      const select = document.getElementById('predict-bank');
+      select.addEventListener('change', () => {
+        predictionBankId = select.value;
+        const button = singleForm.querySelector('button[type="submit"]');
+        const next = banks.find(bank => bank.id === predictionBankId);
+        if (button && next) button.textContent = `Predict ${next.name}`;
+      });
+      singleForm.addEventListener('submit', event => {
+        event.preventDefault();
+        predictionBankId = select.value;
+        const bank = banks.find(item => item.id === predictionBankId);
+        if (!bank) return;
+        predictionResult = scorePrediction(bank);
+        renderPrediction(container);
+        const results = document.getElementById('predict-results');
+        if (results) results.scrollIntoView({ block: 'start' });
+      });
+    }
+
+    // Event handlers for Compare form
+    const compareForm = document.getElementById('predict-compare-form');
+    if (compareForm) {
+      compareForm.addEventListener('submit', event => {
+        event.preventDefault();
+        const selA = document.getElementById('predict-bank-a');
+        const selB = document.getElementById('predict-bank-b');
+        if (selA && selB) {
+          predictionBankId = selA.value;
+          predictionCompareBankId = selB.value;
+          const bankA = banks.find(item => item.id === predictionBankId);
+          const bankB = banks.find(item => item.id === predictionCompareBankId);
+          if (bankA && bankB) {
+            predictionCompareResultA = scorePrediction(bankA);
+            predictionCompareResultB = scorePrediction(bankB);
+          }
+          renderPrediction(container);
+          const compResults = document.getElementById('predict-compare-results');
+          if (compResults) compResults.scrollIntoView({ block: 'start' });
+        }
+      });
+    }
+  }
+
+  // ==========================================
+  // SINGLE RESULT RENDERER
+  // ==========================================
+  function renderPredictionResults(result, stale) {
+    const incomeDelta = result.nextIncome - result.currentIncome;
+    const profitDelta = result.nextProfit - result.currentProfit;
+    const guidanceGap = result.profitGrowth - result.guidance;
+    const bearProfit = result.currentProfit * (1 + (result.profitGrowth - result.profitError) / 100);
+    const bullProfit = result.currentProfit * (1 + (result.profitGrowth + result.profitError) / 100);
+    const bearIncome = result.currentIncome * (1 + (result.incomeGrowth - result.incomeError) / 100);
+    const bullIncome = result.currentIncome * (1 + (result.incomeGrowth + result.incomeError) / 100);
+    const marginNow = result.currentIncome ? (result.currentProfit / result.currentIncome) * 100 : 0;
+    const marginNext = result.nextIncome ? (result.nextProfit / result.nextIncome) * 100 : 0;
+
+    return `
+      ${stale ? `<p class="mb-4 rounded-sm border border-caution/30 bg-caution/10 px-4 py-3 text-[12px] text-caution">These figures are still for ${mlEscape(result.bank.name)}. Run the model again to predict the bank now selected.</p>` : ''}
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-primary">${mlEscape(result.horizon)} · ${mlEscape(result.bank.ticker)}</p>
+          <h2 class="mt-1 font-display text-3xl text-foreground">${mlEscape(result.bank.name)}</h2>
+          <p class="mt-1 text-[12px] text-muted-foreground">${mlEscape(result.bank.hq_city)}, ${mlEscape(result.bank.country)} · trained on ${result.peers} other banks</p>
+        </div>
+        <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Profit model R² ${result.profitR2.toFixed(2)}</p>
+      </div>
+
+      <div class="mt-6 grid gap-3 sm:grid-cols-3">
+        <div class="rounded-sm border border-border bg-card/40 px-4 py-3">
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Predicted income</p>
+          <p class="mt-1 font-display text-2xl text-foreground">${formatMoney(result.nextIncome)}</p>
+          <p class="mt-1 text-[11px] ${incomeDelta >= 0 ? 'text-positive' : 'text-negative'}">${formatSignPct(result.incomeGrowth)} from ${formatMoney(result.currentIncome)}</p>
+        </div>
+        <div class="rounded-sm border border-border bg-card/40 px-4 py-3">
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Predicted profit</p>
+          <p class="mt-1 font-display text-2xl text-foreground">${formatMoney(result.nextProfit)}</p>
+          <p class="mt-1 text-[11px] ${profitDelta >= 0 ? 'text-positive' : 'text-negative'}">${formatSignPct(result.profitGrowth)} from ${formatMoney(result.currentProfit)}</p>
+        </div>
+        <div class="rounded-sm border border-border bg-card/40 px-4 py-3">
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Versus stated guidance</p>
+          <p class="mt-1 font-display text-2xl ${guidanceGap >= 0 ? 'text-positive' : 'text-negative'}">${guidanceGap >= 0 ? '+' : ''}${guidanceGap.toFixed(1)} pt</p>
+          <p class="mt-1 text-[11px] text-muted-foreground">Model ${formatSignPct(result.profitGrowth)} · guidance ${formatSignPct(result.guidance)}</p>
+        </div>
+      </div>
+
+      <div class="mt-6 grid gap-6 lg:grid-cols-2">
+        <div class="rounded-sm border border-border bg-card/40 p-4">
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Reported versus FY2026</p>
+          <h3 class="mt-1 font-display text-2xl text-foreground">Income and profit</h3>
+          <p class="mt-2 text-[12px] leading-relaxed text-muted-foreground">Grey is the latest reported year. The second bar is the base-case prediction. Profit margin moves from ${marginNow.toFixed(1)}% to ${marginNext.toFixed(1)}% of income.</p>
+          <div class="mt-2 flex gap-4 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2" style="background:#8d96a6"></span>Reported</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2" style="background:#5eead4"></span>Predicted</span>
+          </div>
+          ${renderPredictCompare(result)}
+        </div>
+        <div class="rounded-sm border border-border bg-card/40 p-4">
+          <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">What moves profit growth</p>
+          <h3 class="mt-1 font-display text-2xl text-foreground">Model contributions</h3>
+          <p class="mt-2 text-[12px] leading-relaxed text-muted-foreground">Each bar is the peer baseline or a one-standard-deviation feature times its weight, in percentage points of FY2026 net-income growth. ${mlEscape(result.bank.region)} peers guided ${formatSignPct(result.regionGrowth)} on average.</p>
+          <div class="mt-5 flex flex-col gap-3">${renderPredictDrivers(result)}</div>
+        </div>
+      </div>
+
+      <div class="mt-6 overflow-x-auto rounded-sm border border-border bg-card/40">
+        <table class="w-full text-left text-[12px]">
+          <thead class="border-b border-border/60 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            <tr>
+              <th class="py-3 pl-4 pr-3">Case</th>
+              <th class="px-3 py-3 text-right">Income growth</th>
+              <th class="px-3 py-3 text-right">FY2026 income</th>
+              <th class="px-3 py-3 text-right">Profit growth</th>
+              <th class="py-3 pl-3 pr-4 text-right">FY2026 profit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${[
+              ['Bear', result.incomeGrowth - result.incomeError, bearIncome, result.profitGrowth - result.profitError, bearProfit],
+              ['Base', result.incomeGrowth, result.nextIncome, result.profitGrowth, result.nextProfit],
+              ['Bull', result.incomeGrowth + result.incomeError, bullIncome, result.profitGrowth + result.profitError, bullProfit]
+            ].map(row => `
+              <tr class="border-b border-border/40 ${row[0] === 'Base' ? 'text-foreground' : 'text-muted-foreground'}">
+                <td class="py-3 pl-4 pr-3 font-medium ${row[0] === 'Base' ? 'text-primary' : ''}">${row[0]}</td>
+                <td class="num px-3 py-3 text-right">${formatSignPct(row[1])}</td>
+                <td class="num px-3 py-3 text-right">${formatMoney(row[2])}</td>
+                <td class="num px-3 py-3 text-right">${formatSignPct(row[3])}</td>
+                <td class="num py-3 pl-3 pr-4 text-right">${formatMoney(row[4])}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-3 text-[12px] leading-relaxed text-muted-foreground">
+        Bear and bull sit one regression error either side of the base case (±${result.profitError.toFixed(1)} pt on profit, ±${result.incomeError.toFixed(1)} pt on income). This is a cross-section of one reported year, not a multi-year time series, and it is not investment advice.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // COMPARATIVE NEGOTIATION RESULTS RENDERER
+  // ==========================================
+  function renderPredictionComparisonResults(resA, resB) {
+    if (!resA || !resB) return '';
+
+    // Calculate comparative metrics
+    const profitDiff = resA.profitGrowth - resB.profitGrowth;
+    const incomeDiff = resA.incomeGrowth - resB.incomeGrowth;
+    const cet1Diff = (Number(resA.bank.cet1_pct) || 0) - (Number(resB.bank.cet1_pct) || 0);
+    const peDiff = (Number(resA.bank.pe_ratio) || 0) - (Number(resB.bank.pe_ratio) || 0);
+    const nplDiff = (Number(resA.bank.npl_pct) || 0) - (Number(resB.bank.npl_pct) || 0);
+    const roeDiff = (Number(resA.bank.roe_pct) || 0) - (Number(resB.bank.roe_pct) || 0);
+
+    // Strategic Stance Synthesis
+    const strongerProfitBank = profitDiff >= 0 ? resA.bank : resB.bank;
+    const saferCapitalBank = cet1Diff >= 0 ? resA.bank : resB.bank;
+    const cheaperValuationBank = peDiff <= 0 ? resA.bank : resB.bank;
+
+    return `
+      <!-- Executive Negotiation Leverage Banner -->
+      <div class="rounded-sm border border-primary/40 bg-card/60 p-6 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-border/40 pb-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-primary/10 border border-primary/30 px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-primary font-bold">
+                Strategic Negotiation Intelligence
+              </span>
+              <span class="font-mono text-[11px] text-muted-foreground">${resA.bank.name} vs ${resB.bank.name}</span>
+            </div>
+            <h2 class="mt-2 font-display text-2xl text-foreground">Comparative Arbitrage &amp; Negotiating Stance</h2>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="rounded-xs border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[11px] text-primary font-bold">
+              ${resA.bank.ticker} ${formatSignPct(resA.profitGrowth)}
+            </span>
+            <span class="font-mono text-[10px] text-muted-foreground uppercase">vs</span>
+            <span class="rounded-xs border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-[11px] text-accent font-bold">
+              ${resB.bank.ticker} ${formatSignPct(resB.profitGrowth)}
+            </span>
+          </div>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-3">
+          <!-- Leverage 1: Growth -->
+          <div class="rounded-sm border border-border/60 bg-background/50 p-3.5">
+            <p class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Earnings Momentum Leverage</p>
+            <p class="mt-1 font-display text-lg text-foreground font-semibold">
+              ${strongerProfitBank.ticker} leads by ${Math.abs(profitDiff).toFixed(1)} pts
+            </p>
+            <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+              FY26 net income growth projected at ${formatSignPct(strongerProfitBank === resA.bank ? resA.profitGrowth : resB.profitGrowth)} vs ${formatSignPct(strongerProfitBank === resA.bank ? resB.profitGrowth : resA.profitGrowth)}. Provides organic pricing resilience.
+            </p>
+          </div>
+
+          <!-- Leverage 2: Solvency -->
+          <div class="rounded-sm border border-border/60 bg-background/50 p-3.5">
+            <p class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Solvency Cushion &amp; Risk Discount</p>
+            <p class="mt-1 font-display text-lg text-foreground font-semibold">
+              ${saferCapitalBank.ticker} has +${Math.abs(cet1Diff).toFixed(1)}% CET1
+            </p>
+            <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+              Higher common equity tier-1 ratio protects against stress tests. The counterparty with lower CET1 can be pressured on risk-adjusted spread terms.
+            </p>
+          </div>
+
+          <!-- Leverage 3: Valuation -->
+          <div class="rounded-sm border border-border/60 bg-background/50 p-3.5">
+            <p class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Valuation Arbitrage Entry</p>
+            <p class="mt-1 font-display text-lg text-foreground font-semibold">
+              ${cheaperValuationBank.ticker} trades at ${cheaperValuationBank.pe_ratio}x P/E
+            </p>
+            <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+              Discount of ${Math.abs(peDiff)} multiple points provides greater re-rating room and margin of safety during valuation negotiations.
+            </p>
+          </div>
+        </div>
+
+        <!-- Actionable Stance -->
+        <div class="rounded-xs bg-secondary/50 border border-border/60 p-3 text-[12px] leading-relaxed text-foreground flex items-start gap-2">
+          <span class="text-primary font-bold font-mono">TACTICAL TAKEAWAY:</span>
+          <span>
+            In deal or capital negotiations, benchmark ${resA.bank.ticker} against ${resB.bank.ticker}. If negotiating with ${resA.bank.ticker}, use ${resB.bank.ticker}'s ${peDiff > 0 ? 'cheaper valuation multiple' : 'higher loan expansion'} as benchmark leverage. If defending terms, emphasize ${resA.bank.ticker}'s ${cet1Diff >= 0 ? 'superior CET1 buffer' : 'operational cost efficiency'}.
+          </span>
+        </div>
+      </div>
+
+      <!-- Graphical Observation 1: Side-by-Side Financial Growth Trajectory -->
+      <div class="rounded-sm border border-border bg-card/40 p-5 space-y-3">
+        <div class="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/40 pb-3">
+          <div>
+            <p class="font-mono text-[9px] uppercase tracking-[0.2em] text-primary">Graphical Observation 1</p>
+            <h3 class="font-display text-xl text-foreground">Projected Revenue &amp; Net Income Trajectory</h3>
+          </div>
+          <div class="flex items-center gap-4 font-mono text-[10px] uppercase tracking-wider">
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-xs" style="background:#d4b482"></span>${resA.bank.ticker} (Target)</span>
+            <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-xs" style="background:#2dd4bf"></span>${resB.bank.ticker} (Peer)</span>
+          </div>
+        </div>
+        <p class="text-[12px] text-muted-foreground">
+          Visual comparison of latest reported figures (grey tones) against FY2026 regression model forecasts (highlighted bars). Allows immediate assessment of relative scale and growth velocity.
+        </p>
+        <div class="pt-2">
+          ${renderNegotiationTrajectoryChart(resA, resB)}
+        </div>
+      </div>
+
+      <!-- Graphical Observation 2: Six-Pillar Competitive Radar / Relative Strength Chart -->
+      <div class="rounded-sm border border-border bg-card/40 p-5 space-y-4">
+        <div class="border-b border-border/40 pb-3">
+          <p class="font-mono text-[9px] uppercase tracking-[0.2em] text-primary">Graphical Observation 2</p>
+          <h3 class="font-display text-xl text-foreground">Six-Pillar Relative Strength &amp; Risk Metrics</h3>
+          <p class="mt-1 text-[12px] text-muted-foreground">
+            Head-to-head comparison across all six foundational ratios utilized in the leave-one-out OLS predictive regression.
+          </p>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          ${renderNegotiationPillarsChart(resA, resB)}
+        </div>
+      </div>
+
+      <!-- Graphical Observation 3: Bear / Base / Bull Risk Corridor Comparison -->
+      <div class="rounded-sm border border-border bg-card/40 p-5 space-y-3">
+        <div class="border-b border-border/40 pb-3">
+          <p class="font-mono text-[9px] uppercase tracking-[0.2em] text-primary">Graphical Observation 3</p>
+          <h3 class="font-display text-xl text-foreground">Earnings Forecast Sensitivity Corridors</h3>
+          <p class="mt-1 text-[12px] text-muted-foreground">
+            Corridor of outcomes sitting ± 1 regression standard error around the base case prediction. Highlights which bank carries higher forecast dispersion risk.
+          </p>
+        </div>
+        <div class="pt-2">
+          ${renderNegotiationScenariosChart(resA, resB)}
+        </div>
+      </div>
+
+      <!-- Comprehensive Negotiation Table -->
+      <div class="rounded-sm border border-border bg-card/40 overflow-hidden">
+        <div class="p-4 border-b border-border/50">
+          <h3 class="font-display text-lg text-foreground">Head-to-Head Negotiating Metrics Table</h3>
+          <p class="text-[11px] font-mono text-muted-foreground uppercase tracking-wider mt-0.5">Comprehensive Side-by-Side Breakdown</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-[12px]">
+            <thead class="border-b border-border/60 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground bg-secondary/30">
+              <tr>
+                <th class="py-3 pl-4 pr-3">Dimension / Metric</th>
+                <th class="px-3 py-3 text-right text-primary font-bold">${resA.bank.name} (${resA.bank.ticker})</th>
+                <th class="px-3 py-3 text-right text-accent font-bold">${resB.bank.name} (${resB.bank.ticker})</th>
+                <th class="py-3 pl-3 pr-4 text-right">Negotiating Delta / Advantage</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-border/40">
+              <!-- Revenue -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">FY26 Projected Revenue</td>
+                <td class="num px-3 py-3 text-right text-foreground font-semibold">${formatMoney(resA.nextIncome)} (${formatSignPct(resA.incomeGrowth)})</td>
+                <td class="num px-3 py-3 text-right text-foreground font-semibold">${formatMoney(resB.nextIncome)} (${formatSignPct(resB.incomeGrowth)})</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${incomeDiff >= 0 ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${incomeDiff >= 0 ? resA.bank.ticker + ' +' + incomeDiff.toFixed(1) + ' pts' : resB.bank.ticker + ' +' + Math.abs(incomeDiff).toFixed(1) + ' pts'}
+                </td>
+              </tr>
+              <!-- Profit -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">FY26 Projected Net Income</td>
+                <td class="num px-3 py-3 text-right text-foreground font-semibold">${formatMoney(resA.nextProfit)} (${formatSignPct(resA.profitGrowth)})</td>
+                <td class="num px-3 py-3 text-right text-foreground font-semibold">${formatMoney(resB.nextProfit)} (${formatSignPct(resB.profitGrowth)})</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${profitDiff >= 0 ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${profitDiff >= 0 ? resA.bank.ticker + ' +' + profitDiff.toFixed(1) + ' pts' : resB.bank.ticker + ' +' + Math.abs(profitDiff).toFixed(1) + ' pts'}
+                </td>
+              </tr>
+              <!-- Solvency CET1 -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Solvency Buffer (CET1 Ratio)</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resA.bank.cet1_pct}%</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resB.bank.cet1_pct}%</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${cet1Diff >= 0 ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${cet1Diff >= 0 ? resA.bank.ticker + ' +' + cet1Diff.toFixed(1) + '% buffer' : resB.bank.ticker + ' +' + Math.abs(cet1Diff).toFixed(1) + '% buffer'}
+                </td>
+              </tr>
+              <!-- Asset Quality NPL -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Credit Quality (NPL Ratio)</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resA.bank.npl_pct}%</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resB.bank.npl_pct}%</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${nplDiff <= 0 ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${nplDiff <= 0 ? resA.bank.ticker + ' lower risk (' + Math.abs(nplDiff).toFixed(2) + ' pts)' : resB.bank.ticker + ' lower risk (' + nplDiff.toFixed(2) + ' pts)'}
+                </td>
+              </tr>
+              <!-- Cost Income -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Cost-to-Income Efficiency</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resA.bank.cost_income_pct}%</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resB.bank.cost_income_pct}%</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${resA.bank.cost_income_pct <= resB.bank.cost_income_pct ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${resA.bank.cost_income_pct <= resB.bank.cost_income_pct ? resA.bank.ticker + ' +' + (resB.bank.cost_income_pct - resA.bank.cost_income_pct) + ' pts leaner' : resB.bank.ticker + ' +' + (resA.bank.cost_income_pct - resB.bank.cost_income_pct) + ' pts leaner'}
+                </td>
+              </tr>
+              <!-- Valuation PE -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Valuation Multiple (P/E)</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resA.bank.pe_ratio}x</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resB.bank.pe_ratio}x</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${peDiff <= 0 ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${peDiff <= 0 ? resA.bank.ticker + ' ' + Math.abs(peDiff) + 'x discount' : resB.bank.ticker + ' ' + peDiff + 'x discount'}
+                </td>
+              </tr>
+              <!-- Dividend Yield -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Dividend Yield</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resA.bank.dividend_yield_pct}%</td>
+                <td class="num px-3 py-3 text-right text-foreground">${resB.bank.dividend_yield_pct}%</td>
+                <td class="num py-3 pl-3 pr-4 text-right ${resA.bank.dividend_yield_pct >= resB.bank.dividend_yield_pct ? 'text-primary' : 'text-accent'} font-mono text-[11px]">
+                  ${resA.bank.dividend_yield_pct >= resB.bank.dividend_yield_pct ? resA.bank.ticker + ' +' + (resA.bank.dividend_yield_pct - resB.bank.dividend_yield_pct).toFixed(1) + ' pts' : resB.bank.ticker + ' +' + (resB.bank.dividend_yield_pct - resA.bank.dividend_yield_pct).toFixed(1) + ' pts'}
+                </td>
+              </tr>
+              <!-- Balance Sheet Scale -->
+              <tr>
+                <td class="py-3 pl-4 pr-3 font-medium text-foreground">Balance Sheet Scale (Assets)</td>
+                <td class="num px-3 py-3 text-right text-foreground">${formatMoney(resA.bank.total_assets_bn)}</td>
+                <td class="num px-3 py-3 text-right text-foreground">${formatMoney(resB.bank.total_assets_bn)}</td>
+                <td class="num py-3 pl-3 pr-4 text-right text-muted-foreground font-mono text-[11px]">
+                  ${resA.bank.total_assets_bn >= resB.bank.total_assets_bn ? resA.bank.ticker + ' larger' : resB.bank.ticker + ' larger'}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
   // ==========================================
   // VIEW 4: AI ANALYST PAGE
   // ==========================================
@@ -2684,12 +3535,9 @@ With $${formatMoney(assets)} in assets, ${bank.name} operates at a ${roe}% ROE a
             </div>
           </div>
 
-          <div class="flex flex-col items-center justify-center rounded-sm border border-border/70 bg-background/40 p-4">
-            <div id="lcr-gauge-container" class="w-full max-w-[200px]">
-              <!-- Injected by updateLcrCalc -->
-            </div>
-            <div id="lcr-status-box" class="mt-3 text-center">
-              <!-- Injected by updateLcrCalc -->
+          <div class="flex flex-col justify-between rounded-sm border border-border/70 bg-background/40 p-5">
+            <div id="lcr-status-box" class="w-full space-y-3">
+              <!-- Clean executive compliance status (meter gauge removed as requested) -->
             </div>
           </div>
         </div>
@@ -2773,39 +3621,55 @@ With $${formatMoney(assets)} in assets, ${bank.name} operates at a ${roe}% ROE a
     const statusLabel = ratio >= 130 ? 'Comfortable surplus' : ratio >= 100 ? 'Meets minimum' : 'Below regulatory threshold';
 
     const clampedRatio = Math.min(200, Math.max(0, ratio));
-    const angle = 180 - (clampedRatio / 200) * 180;
-    const rad = angle * Math.PI / 180;
-    const nx = 100 + 52 * Math.cos(rad);
-    const ny = 100 - 52 * Math.sin(rad);
-    const strokeColor = tone === 'positive' ? 'hsl(var(--positive))' : tone === 'negative' ? 'hsl(var(--negative))' : 'hsl(var(--caution))';
-
-    const gaugeHtml = `
-      <svg viewBox="0 0 200 118" class="w-full">
-        <path d="M 24 100 A 76 76 0 0 1 100 24" fill="none" stroke="hsl(var(--negative) / 0.45)" stroke-width="9"></path>
-        <path d="M 100 24 A 76 76 0 0 1 142 36" fill="none" stroke="hsl(var(--caution) / 0.5)" stroke-width="9"></path>
-        <path d="M 142 36 A 76 76 0 0 1 176 100" fill="none" stroke="hsl(var(--positive) / 0.4)" stroke-width="9"></path>
-        <line x1="100" y1="26" x2="100" y2="39" stroke="hsl(var(--foreground) / 0.7)" stroke-width="1.5" stroke-dasharray="2 2"></line>
-        <line x1="100" y1="100" x2="${nx.toFixed(2)}" y2="${ny.toFixed(2)}" stroke="${strokeColor}" stroke-width="2.5" stroke-linecap="round"></line>
-        <circle cx="100" cy="100" r="3.5" fill="${strokeColor}"></circle>
-        <text x="24" y="114" text-anchor="middle" class="fill-muted-foreground" style="font-size:7px; font-family:var(--font-mono);">0%</text>
-        <text x="100" y="18" text-anchor="middle" class="fill-muted-foreground" style="font-size:7px; font-family:var(--font-mono);">100%</text>
-        <text x="176" y="114" text-anchor="middle" class="fill-muted-foreground" style="font-size:7px; font-family:var(--font-mono);">200%</text>
-      </svg>
-    `;
-
-    const gaugeContainer = document.getElementById('lcr-gauge-container');
-    if (gaugeContainer) gaugeContainer.innerHTML = gaugeHtml;
+    const barWidth = Math.min(100, Math.max(3, (clampedRatio / 200) * 100));
+    const statusColor = tone === 'positive' ? 'text-positive' : tone === 'negative' ? 'text-negative' : 'text-caution';
+    const statusBg = tone === 'positive' ? 'bg-positive/10 border-positive/30 text-positive' : tone === 'negative' ? 'bg-negative/10 border-negative/30 text-negative' : 'bg-caution/10 border-caution/30 text-caution';
+    const barFill = tone === 'positive' ? 'bg-positive' : tone === 'negative' ? 'bg-negative' : 'bg-caution';
+    const days = Math.round(hqla / Math.max(0.1, outflows / 30));
 
     const statusBox = document.getElementById('lcr-status-box');
     if (statusBox) {
       statusBox.innerHTML = `
-        <p class="num text-2xl font-bold ${tone === 'positive' ? 'text-positive' : tone === 'negative' ? 'text-negative' : 'text-caution'}">
-          ${Math.round(ratio)}%
-        </p>
-        <p class="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mt-0.5">${statusLabel}</p>
-        <p class="num text-[11px] mt-1 text-muted-foreground">
-          Surplus / Shortfall: <span class="text-foreground">${surplus >= 0 ? '+' : ''}$${surplus.toFixed(1)}B</span>
-        </p>
+        <div class="flex items-start justify-between gap-3 border-b border-border/40 pb-3">
+          <div>
+            <span class="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">Simulated 30-Day LCR</span>
+            <div class="mt-1 flex items-baseline gap-2">
+              <span class="num text-3xl font-bold ${statusColor}">${Math.round(ratio)}%</span>
+              <span class="font-mono text-[11px] text-muted-foreground">/ 100% floor</span>
+            </div>
+          </div>
+          <span class="rounded-full border px-2.5 py-1 font-mono text-[9px] uppercase tracking-wider font-semibold ${statusBg}">
+            ${statusLabel}
+          </span>
+        </div>
+
+        <div class="py-2">
+          <div class="flex justify-between font-mono text-[9px] uppercase tracking-wider text-muted-foreground mb-1.5">
+            <span>0%</span>
+            <span class="text-foreground font-semibold flex items-center gap-1">
+              <span class="inline-block w-1.5 h-1.5 rounded-full bg-primary"></span>
+              100% Min Req
+            </span>
+            <span>200%+</span>
+          </div>
+          <div class="relative h-3 w-full rounded-full bg-secondary/80 overflow-hidden border border-border/60">
+            <div class="absolute top-0 bottom-0 left-1/2 w-0.5 bg-foreground/60 z-10" title="100% Minimum Floor"></div>
+            <div class="h-full ${barFill} transition-all duration-300 rounded-full" style="width: ${barWidth}%;"></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 border-t border-border/40 pt-3 text-[11px]">
+          <div class="rounded-xs bg-background/50 p-2 border border-border/40">
+            <p class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Cash Buffer</p>
+            <p class="num font-bold text-sm mt-0.5 ${surplus >= 0 ? 'text-positive' : 'text-negative'}">
+              ${surplus >= 0 ? '+' : ''}${surplus.toFixed(1)}B
+            </p>
+          </div>
+          <div class="rounded-xs bg-background/50 p-2 border border-border/40">
+            <p class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Survival Horizon</p>
+            <p class="num font-bold text-sm mt-0.5 text-foreground">${days} days</p>
+          </div>
+        </div>
       `;
     }
 
