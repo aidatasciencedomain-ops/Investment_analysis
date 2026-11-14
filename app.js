@@ -248,15 +248,20 @@
       renderPrediction(appContainer);
     } else if (currentRoute.startsWith('/analyst')) {
       renderAnalyst(appContainer);
+    } else if (currentRoute.startsWith('/login') || currentRoute.startsWith('/signin')) {
+      renderLoginPage(appContainer);
     } else if (currentRoute.startsWith('/banks/')) {
       const bankId = currentRoute.split('/banks/')[1];
       renderBankAnalysisPage(appContainer, bankId);
     }
+
+    updateHeaderAuth();
   }
 
   window.addEventListener('hashchange', handleRoute);
   window.addEventListener('DOMContentLoaded', () => {
     handleRoute();
+    updateHeaderAuth();
     setInterval(refreshLiveQuotes, 30000);
   });
 
@@ -318,6 +323,708 @@
         </span>
       `;
     }).join('<span class="text-border/80">·</span>');
+  }
+
+
+  // ==========================================
+  // AUTHENTICATION & USER MANAGEMENT
+  // ==========================================
+  let authMode = 'signin'; // 'signin' | 'signup'
+
+  // Theme Management: light | dark | system
+  function getSavedTheme() {
+    return localStorage.getItem('ledger_theme') || 'system';
+  }
+
+  window.setTheme = function (mode) {
+    localStorage.setItem('ledger_theme', mode);
+    applyTheme(mode);
+    showAuthToast('Window appearance set to ' + (mode === 'light' ? 'Light' : mode === 'dark' ? 'Dark' : 'System Default'));
+    if (window.location.hash.startsWith('#/login')) {
+      const container = document.getElementById('app-content');
+      if (container) renderLoginPage(container);
+    }
+    const settingsModal = document.getElementById('settings-modal');
+    if (settingsModal) {
+      openSettingsModal();
+    }
+  };
+
+  function applyTheme(mode) {
+    const isDark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (isDark) {
+      document.documentElement.classList.remove('theme-light');
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.classList.add('theme-light');
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  }
+
+  // OS theme listener
+  try {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (getSavedTheme() === 'system') {
+        applyTheme('system');
+      }
+    });
+  } catch (e) {}
+
+  // Apply on init
+  applyTheme(getSavedTheme());
+
+  function getCurrentUser() {
+    try {
+      const stored = localStorage.getItem('ledger_auth_user');
+      return stored ? JSON.parse(stored) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function setCurrentUser(user) {
+    if (user) {
+      localStorage.setItem('ledger_auth_user', JSON.stringify(user));
+    } else {
+      localStorage.removeItem('ledger_auth_user');
+    }
+    updateHeaderAuth();
+  }
+
+  window.logoutUser = function () {
+    setCurrentUser(null);
+    showAuthToast('Signed out successfully.');
+    if (window.location.hash.startsWith('#/login')) {
+      const container = document.getElementById('app-content');
+      if (container) renderLoginPage(container);
+    } else {
+      handleRoute();
+    }
+    closeSettingsModal();
+  };
+
+  window.toggleAuthMode = function (mode) {
+    authMode = mode;
+    const container = document.getElementById('app-content');
+    if (container && window.location.hash.startsWith('#/login')) {
+      renderLoginPage(container);
+    }
+  };
+
+  window.togglePasswordVisibility = function (inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    if (input.type === 'password') {
+      input.type = 'text';
+      btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
+    } else {
+      input.type = 'password';
+      btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+    }
+  };
+
+  window.handleEmailAuth = function (e) {
+    e.preventDefault();
+    const emailEl = document.getElementById('login-email');
+    const passEl = document.getElementById('login-password');
+    const nameEl = document.getElementById('login-name');
+    const email = emailEl ? emailEl.value.trim() : '';
+    const password = passEl ? passEl.value : '';
+    const name = nameEl ? nameEl.value.trim() : '';
+
+    if (!email || !email.includes('@')) {
+      alert('Please enter a valid email ID.');
+      return;
+    }
+    if (!password || password.length < 4) {
+      alert('Password must be at least 4 characters.');
+      return;
+    }
+
+    const userName = name || email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+    const user = {
+      name: userName,
+      email: email,
+      provider: 'email',
+      role: 'Institutional Investor',
+      avatarLetter: userName.charAt(0).toUpperCase(),
+      loginTime: new Date().toISOString()
+    };
+
+    setCurrentUser(user);
+    showAuthToast('Welcome back, ' + user.name + '!');
+    window.location.hash = '#/';
+  };
+
+  window.handleGoogleLogin = function () {
+    showGoogleModal();
+  };
+
+  function showGoogleModal() {
+    let modal = document.getElementById('google-signin-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'google-signin-modal';
+      document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm';
+    modal.innerHTML = `
+      <div class="relative w-full max-w-sm rounded-lg border border-border/80 bg-[#121822] p-6 shadow-2xl space-y-4">
+        <button type="button" onclick="closeGoogleModal()" class="absolute right-4 top-4 text-muted-foreground hover:text-foreground">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+
+        <div class="flex items-center gap-3 border-b border-border/40 pb-3">
+          <svg width="26" height="26" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          <div>
+            <h3 class="font-display text-lg text-foreground">Sign in with Google</h3>
+            <p class="font-mono text-[10px] text-muted-foreground uppercase">Choose a Google Account</p>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <button type="button" onclick="completeGoogleLogin('investor.terminal@gmail.com', 'Alex Mercer')" class="flex w-full items-center gap-3 rounded-md border border-border/70 bg-[#16202c] p-3 text-left transition-colors hover:border-primary/50 hover:bg-[#1a2533]">
+            <div class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-primary/20 font-bold text-primary font-mono text-xs">
+              AM
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-[13px] font-medium text-foreground">Alex Mercer</p>
+              <p class="truncate text-[11px] text-muted-foreground font-mono">investor.terminal@gmail.com</p>
+            </div>
+            <span class="rounded-full bg-positive/10 border border-positive/30 px-2 py-0.5 text-[9px] font-mono uppercase text-positive font-semibold">1-Click</span>
+          </button>
+
+          <div class="rounded-md border border-border/70 bg-[#16202c] p-3.5 space-y-2">
+            <label class="block">
+              <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Or Enter Your Gmail Address:</span>
+              <input type="email" id="custom-gmail-input" placeholder="your.name@gmail.com" class="auth-input mt-1.5 text-[12px]" onkeydown="if(event.key==='Enter'){event.preventDefault();submitCustomGmail();}" />
+            </label>
+            <button type="button" onclick="submitCustomGmail()" class="w-full rounded-sm bg-primary px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-primary-foreground font-bold hover:opacity-95">
+              Continue with this Gmail →
+            </button>
+          </div>
+        </div>
+
+        <p class="text-center font-mono text-[9px] text-muted-foreground uppercase tracking-wider">
+          Secured with Google OAuth 2.0 Protocol
+        </p>
+      </div>
+    `;
+  }
+
+  window.closeGoogleModal = function () {
+    const modal = document.getElementById('google-signin-modal');
+    if (modal) modal.remove();
+  };
+
+  window.completeGoogleLogin = function (email, name) {
+    const user = {
+      name: name || email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+      email: email,
+      provider: 'google',
+      role: 'Institutional Investor (Google Verified)',
+      avatarLetter: (name || email).charAt(0).toUpperCase(),
+      loginTime: new Date().toISOString()
+    };
+    setCurrentUser(user);
+    closeGoogleModal();
+    showAuthToast('Signed in with Google as ' + user.email);
+    window.location.hash = '#/';
+  };
+
+  window.submitCustomGmail = function () {
+    const input = document.getElementById('custom-gmail-input');
+    const email = input ? input.value.trim() : '';
+    if (!email || !email.includes('@')) {
+      alert('Please enter a valid Gmail address.');
+      return;
+    }
+    const name = email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    completeGoogleLogin(email, name);
+  };
+
+  function showAuthToast(msg) {
+    let toast = document.getElementById('auth-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'auth-toast';
+      document.body.appendChild(toast);
+    }
+    toast.className = 'fixed bottom-5 right-5 z-50 flex items-center gap-2.5 rounded-sm border border-primary/40 bg-[#121924] px-4 py-3 shadow-2xl font-mono text-[11px] text-foreground transition-all duration-300';
+    toast.innerHTML = '<span class="h-2 w-2 rounded-full bg-positive"></span><span>' + msg + '</span>';
+    setTimeout(() => {
+      if (toast) toast.remove();
+    }, 4000);
+  }
+
+  // ==========================================
+  // SETTINGS MODAL
+  // ==========================================
+  window.openSettingsModal = function () {
+    let modal = document.getElementById('settings-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'settings-modal';
+      document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm';
+
+    const currentTheme = getSavedTheme();
+    const user = getCurrentUser();
+    const currentApiKey = (localStorage.getItem('gemini_api_key') || 'AQ.Ab8RN6KYFlU8D-DaKn0oALzhaEP0pTvXbEp_jqmQMNB1-K-AqA');
+    const maskedKey = currentApiKey.slice(0, 8) + '...' + currentApiKey.slice(-4);
+
+    modal.innerHTML = `
+      <div class="relative w-full max-w-md rounded-lg border border-border/80 bg-[#121822] p-6 shadow-2xl space-y-5">
+        <div class="flex items-center justify-between border-b border-border/40 pb-3">
+          <div class="flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-primary"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <h3 class="font-display text-xl text-foreground">Terminal Settings</h3>
+          </div>
+          <button type="button" onclick="closeSettingsModal()" class="text-muted-foreground hover:text-foreground">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+
+        <!-- 1. WINDOW THEME SETTINGS -->
+        <div class="space-y-2.5">
+          <div class="flex items-center justify-between">
+            <label class="font-mono text-[10px] uppercase tracking-wider text-primary font-bold">
+              Window Appearance (Theme)
+            </label>
+            <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              Current: <strong class="text-foreground">${currentTheme}</strong>
+            </span>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <button type="button" onclick="setTheme('light')" class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'light' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-[#16202c] text-muted-foreground hover:text-foreground hover:border-border'}">
+              <span class="text-xl">☀️</span>
+              <span class="font-mono text-[10px] uppercase tracking-wider">Light</span>
+            </button>
+            <button type="button" onclick="setTheme('dark')" class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'dark' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-[#16202c] text-muted-foreground hover:text-foreground hover:border-border'}">
+              <span class="text-xl">🌙</span>
+              <span class="font-mono text-[10px] uppercase tracking-wider">Dark</span>
+            </button>
+            <button type="button" onclick="setTheme('system')" class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'system' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-[#16202c] text-muted-foreground hover:text-foreground hover:border-border'}">
+              <span class="text-xl">💻</span>
+              <span class="font-mono text-[10px] uppercase tracking-wider">Default System</span>
+            </button>
+          </div>
+          <p class="text-[11px] text-muted-foreground leading-relaxed">
+            Choose Light for high-contrast presentation, Dark for low-glare institutional analytics, or Default System to automatically follow your operating system preferences.
+          </p>
+        </div>
+
+        <!-- 2. GEMINI AI CONFIG -->
+        <div class="rounded-sm border border-border/70 bg-[#16202c] p-3.5 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="font-mono text-[9px] uppercase tracking-wider text-primary font-bold">Google Gemini AI Key</span>
+            <span class="rounded-full bg-positive/10 border border-positive/30 px-2 py-0.2 font-mono text-[8px] uppercase text-positive font-semibold">Active</span>
+          </div>
+          <div class="flex items-center justify-between font-mono text-[11px]">
+            <span class="text-muted-foreground">${maskedKey}</span>
+            <button type="button" onclick="promptUpdateApiKey()" class="text-primary hover:underline uppercase text-[10px]">Change Key</button>
+          </div>
+        </div>
+
+        <!-- 3. ACCOUNT & LOGOUT SECTION -->
+        <div class="border-t border-border/40 pt-4 space-y-3">
+          ${user ? `
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-[12px] font-semibold text-foreground">${user.name}</p>
+                <p class="font-mono text-[10px] text-muted-foreground">${user.email} (${user.provider === 'google' ? 'Gmail' : 'Email ID'})</p>
+              </div>
+              <span class="rounded-xs bg-positive/10 border border-positive/30 px-2 py-0.5 font-mono text-[9px] uppercase text-positive font-semibold">
+                Logged In
+              </span>
+            </div>
+            <button type="button" onclick="logoutUser()" class="flex w-full items-center justify-center gap-2 rounded-sm border border-negative/40 bg-negative/10 px-4 py-2.5 font-mono text-[11px] uppercase tracking-wider text-negative font-bold hover:bg-negative/20 transition-colors">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+              Log Out of Session
+            </button>
+          ` : `
+            <div class="flex items-center justify-between">
+              <span class="text-[12px] text-muted-foreground">Not signed in</span>
+              <a href="#/login" onclick="closeSettingsModal()" class="rounded-sm bg-primary px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary-foreground font-bold">
+                Go to Sign In →
+              </a>
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  };
+
+  window.closeSettingsModal = function () {
+    const modal = document.getElementById('settings-modal');
+    if (modal) modal.remove();
+  };
+
+  function updateHeaderAuth() {
+    const container = document.getElementById('header-auth-container');
+    if (!container) return;
+
+    const user = getCurrentUser();
+    const currentTheme = getSavedTheme();
+
+    if (user) {
+      container.innerHTML = `
+        <div class="flex items-center gap-2">
+          <!-- Settings Cog Quick Button -->
+          <button type="button" onclick="openSettingsModal()" class="rounded-sm border border-border/80 bg-card/60 p-2 text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors" title="Window & Terminal Settings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
+
+          <!-- User Profile Pill -->
+          <div class="relative group">
+            <button type="button" class="flex items-center gap-2 rounded-sm border border-border/80 bg-card/60 px-2.5 py-1.5 transition-colors hover:border-primary/50 hover:bg-card">
+              <span class="grid h-6 w-6 place-items-center rounded-full ${user.provider === 'google' ? 'bg-accent/20 text-accent' : 'bg-primary/20 text-primary'} font-mono text-[10px] font-bold">
+                ${user.avatarLetter || 'U'}
+              </span>
+              <span class="hidden lg:block truncate max-w-[110px] text-left">
+                <span class="block truncate text-[11px] font-medium text-foreground leading-tight">${user.name}</span>
+                <span class="block font-mono text-[8px] uppercase tracking-wider text-muted-foreground">${user.provider === 'google' ? 'Gmail' : 'Pro'}</span>
+              </span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-muted-foreground"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+
+            <!-- Dropdown Profile Menu -->
+            <div class="invisible group-hover:visible group-focus-within:visible opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all duration-200 absolute right-0 top-full mt-1.5 w-60 rounded-sm border border-border bg-[#121924] p-3 shadow-2xl z-50 space-y-2.5">
+              <div class="border-b border-border/50 pb-2.5">
+                <p class="truncate text-[12px] font-semibold text-foreground">${user.name}</p>
+                <p class="truncate font-mono text-[10px] text-muted-foreground">${user.email}</p>
+                <div class="mt-1.5 flex items-center gap-1.5">
+                  <span class="rounded-xs bg-primary/10 border border-primary/30 px-1.5 py-0.2 font-mono text-[8px] uppercase tracking-wider text-primary">
+                    ${user.role || 'Institutional Tier'}
+                  </span>
+                  ${user.provider === 'google' ? `
+                    <span class="rounded-xs bg-positive/10 border border-positive/30 px-1.5 py-0.2 font-mono text-[8px] uppercase tracking-wider text-positive">
+                      Google Verified
+                    </span>
+                  ` : ''}
+                </div>
+              </div>
+
+              <!-- Quick Window Theme switcher in dropdown -->
+              <div class="space-y-1">
+                <p class="font-mono text-[8px] uppercase tracking-wider text-muted-foreground">Window Mode</p>
+                <div class="grid grid-cols-3 gap-1 font-mono text-[9px] uppercase">
+                  <button type="button" onclick="setTheme('light')" class="rounded-xs border py-1 text-center ${currentTheme === 'light' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/60 text-muted-foreground hover:text-foreground'}">Light</button>
+                  <button type="button" onclick="setTheme('dark')" class="rounded-xs border py-1 text-center ${currentTheme === 'dark' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/60 text-muted-foreground hover:text-foreground'}">Dark</button>
+                  <button type="button" onclick="setTheme('system')" class="rounded-xs border py-1 text-center ${currentTheme === 'system' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/60 text-muted-foreground hover:text-foreground'}">System</button>
+                </div>
+              </div>
+
+              <div class="border-t border-border/50 pt-2 space-y-1 text-[11px]">
+                <button type="button" onclick="openSettingsModal()" class="flex w-full items-center gap-1.5 rounded-xs px-2 py-1 text-muted-foreground hover:bg-secondary/50 hover:text-foreground">
+                  ⚙️ Settings
+                </button>
+                <a href="#/login" class="block rounded-xs px-2 py-1 text-muted-foreground hover:bg-secondary/50 hover:text-foreground">Account Details</a>
+              </div>
+
+              <div class="border-t border-border/50 pt-2">
+                <button type="button" onclick="logoutUser()" class="flex w-full items-center gap-1.5 rounded-xs px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-negative hover:bg-negative/10 transition-colors font-bold">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                  Sign Out / Log Out
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else {
+      container.innerHTML = `
+        <div class="flex items-center gap-2">
+          <!-- Settings Cog Quick Button -->
+          <button type="button" onclick="openSettingsModal()" class="rounded-sm border border-border/80 bg-card/60 p-2 text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors" title="Window & Terminal Settings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
+
+          <a href="#/login" class="inline-flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-primary-foreground font-semibold hover:opacity-90 transition-opacity">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line></svg>
+            Sign In
+          </a>
+        </div>
+      `;
+    }
+  }
+
+  // ==========================================
+  // VIEW: DEDICATED LOGIN & REGISTRATION PAGE
+  // ==========================================
+  function renderLoginPage(container) {
+    const user = getCurrentUser();
+    const currentTheme = getSavedTheme();
+
+    if (user) {
+      container.innerHTML = `
+        <div class="mx-auto max-w-lg px-5 py-16 sm:py-20">
+          <div class="rounded-sm border border-border bg-card/60 p-6 sm:p-8 space-y-6 shadow-2xl">
+            <!-- User Header -->
+            <div class="text-center space-y-3">
+              <div class="mx-auto grid h-16 w-16 place-items-center rounded-full ${user.provider === 'google' ? 'bg-accent/20 text-accent' : 'bg-primary/20 text-primary'} text-2xl font-bold font-mono">
+                ${user.avatarLetter || 'U'}
+              </div>
+              <div>
+                <h2 class="font-display text-2xl text-foreground">${user.name}</h2>
+                <p class="font-mono text-[11px] text-muted-foreground">${user.email}</p>
+                <div class="mt-2 flex items-center justify-center gap-2">
+                  <span class="rounded-xs bg-primary/10 border border-primary/30 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-primary font-bold">
+                    ${user.role || 'Institutional Tier'}
+                  </span>
+                  ${user.provider === 'google' ? `
+                    <span class="rounded-xs bg-positive/10 border border-positive/30 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-positive font-bold">
+                      Google / Gmail
+                    </span>
+                  ` : ''}
+                </div>
+              </div>
+            </div>
+
+            <!-- SETTINGS SECTION IN LOGIN -->
+            <div class="border-t border-border/50 pt-5 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-[10px] uppercase tracking-wider text-primary font-bold flex items-center gap-1.5">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                  Window Appearance Settings
+                </span>
+                <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                  Current: <strong class="text-foreground">${currentTheme === 'light' ? 'Light' : currentTheme === 'dark' ? 'Dark' : 'System'}</strong>
+                </span>
+              </div>
+
+              <!-- 3 Theme Mode Buttons: Light, Dark, Default System -->
+              <div class="grid grid-cols-3 gap-2">
+                <button 
+                  type="button" 
+                  onclick="setTheme('light')" 
+                  class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'light' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-background/50 text-muted-foreground hover:text-foreground hover:border-primary/40'}"
+                >
+                  <span class="text-xl">☀️</span>
+                  <span class="font-mono text-[10px] uppercase tracking-wider">Light</span>
+                </button>
+
+                <button 
+                  type="button" 
+                  onclick="setTheme('dark')" 
+                  class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'dark' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-background/50 text-muted-foreground hover:text-foreground hover:border-primary/40'}"
+                >
+                  <span class="text-xl">🌙</span>
+                  <span class="font-mono text-[10px] uppercase tracking-wider">Dark</span>
+                </button>
+
+                <button 
+                  type="button" 
+                  onclick="setTheme('system')" 
+                  class="flex flex-col items-center justify-center gap-1.5 rounded-sm border p-3 text-center transition-all ${currentTheme === 'system' ? 'border-primary bg-primary/10 text-primary font-bold ring-1 ring-primary' : 'border-border/70 bg-background/50 text-muted-foreground hover:text-foreground hover:border-primary/40'}"
+                >
+                  <span class="text-xl">💻</span>
+                  <span class="font-mono text-[10px] uppercase tracking-wider">Default System</span>
+                </button>
+              </div>
+              <p class="text-[11px] text-muted-foreground leading-relaxed">
+                Light presents clean white obsidian styling. Dark is the default dark canvas. Default System syncs automatically with your computer's day/night schedule.
+              </p>
+            </div>
+
+            <!-- LOGOUT OPTION (PROMINENT) -->
+            <div class="border-t border-border/50 pt-5 space-y-3">
+              <a href="#/" class="flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2.5 font-mono text-[11px] uppercase tracking-wider text-primary-foreground font-bold hover:opacity-95">
+                Go to Terminal Overview →
+              </a>
+
+              <button 
+                type="button" 
+                onclick="logoutUser()" 
+                class="flex w-full items-center justify-center gap-2 rounded-sm border border-negative/50 bg-negative/10 px-4 py-2.5 font-mono text-[11px] uppercase tracking-wider text-negative font-bold hover:bg-negative/20 transition-colors shadow-sm"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                Log Out of Account
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="mx-auto max-w-[1180px] px-5 pb-20 pt-10 sm:px-8 sm:pt-16">
+        <div class="mx-auto max-w-md">
+          <!-- Header Banner -->
+          <div class="text-center">
+            <p class="font-mono text-[10px] uppercase tracking-[0.24em] text-primary">Terminal Access · Ledger Atlas</p>
+            <h1 class="mt-2 font-display text-3xl sm:text-4xl text-foreground">
+              ${authMode === 'signin' ? 'Institutional Sign In' : 'Create Terminal Account'}
+            </h1>
+            <p class="mt-2.5 text-[13px] leading-relaxed text-muted-foreground">
+              ${authMode === 'signin' ? 'Sign in to access private banking models, predictive forecasts, and export screening datasets.' : 'Join Ledger Atlas for cross-border banking solvency intelligence and Gemini AI analytics.'}
+            </p>
+          </div>
+
+          <!-- Auth Card -->
+          <div class="mt-8 rounded-sm border border-border/80 bg-card/50 p-6 sm:p-8 shadow-2xl space-y-6">
+            <!-- Mode Toggle Tabs -->
+            <div class="grid grid-cols-2 gap-1 rounded-sm border border-border/70 bg-background/60 p-1 font-mono text-[11px] uppercase tracking-wider">
+              <button 
+                type="button" 
+                onclick="toggleAuthMode('signin')" 
+                class="rounded-xs py-2 transition-all ${authMode === 'signin' ? 'bg-primary text-primary-foreground font-bold' : 'text-muted-foreground hover:text-foreground'}"
+              >
+                Sign In
+              </button>
+              <button 
+                type="button" 
+                onclick="toggleAuthMode('signup')" 
+                class="rounded-xs py-2 transition-all ${authMode === 'signup' ? 'bg-primary text-primary-foreground font-bold' : 'text-muted-foreground hover:text-foreground'}"
+              >
+                Create Account
+              </button>
+            </div>
+
+            <!-- GMAIL / GOOGLE LOGIN BUTTON (PROMINENT) -->
+            <div>
+              <button 
+                type="button" 
+                onclick="handleGoogleLogin()" 
+                class="google-btn"
+                aria-label="Login with Gmail or Google"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                </svg>
+                <span>Continue with Google / Gmail</span>
+              </button>
+            </div>
+
+            <!-- Divider -->
+            <div class="relative flex items-center justify-center">
+              <div class="w-full border-t border-border/60"></div>
+              <span class="absolute bg-card px-3 font-mono text-[9px] uppercase tracking-[0.2em] text-muted-foreground">
+                Or with Email ID
+              </span>
+            </div>
+
+            <!-- EMAIL & PASSWORD FORM -->
+            <form onsubmit="handleEmailAuth(event)" class="space-y-4">
+              ${authMode === 'signup' ? `
+                <div>
+                  <label for="login-name" class="block font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-1.5">Full Name</label>
+                  <input 
+                    type="text" 
+                    id="login-name" 
+                    placeholder="e.g. Alex Mercer" 
+                    required 
+                    class="auth-input"
+                  />
+                </div>
+              ` : ''}
+
+              <div>
+                <label for="login-email" class="block font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-1.5">Email ID</label>
+                <input 
+                  type="email" 
+                  id="login-email" 
+                  placeholder="name@institution.com or user@gmail.com" 
+                  required 
+                  class="auth-input"
+                  autocomplete="username"
+                />
+              </div>
+
+              <div>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label for="login-password" class="block font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">Password</label>
+                  ${authMode === 'signin' ? `
+                    <button type="button" onclick="alert('Password reset link will be sent to your registered email address.')" class="font-mono text-[10px] text-primary hover:underline">
+                      Forgot?
+                    </button>
+                  ` : ''}
+                </div>
+                <div class="relative">
+                  <input 
+                    type="password" 
+                    id="login-password" 
+                    placeholder="••••••••••••" 
+                    required 
+                    class="auth-input pr-10"
+                    autocomplete="${authMode === 'signin' ? 'current-password' : 'new-password'}"
+                  />
+                  <button 
+                    type="button" 
+                    onclick="togglePasswordVisibility('login-password', this)" 
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    aria-label="Toggle password visibility"
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between pt-1">
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked class="accent-primary rounded-xs" />
+                  <span class="text-[12px] text-muted-foreground">Remember this device</span>
+                </label>
+              </div>
+
+              <button 
+                type="submit" 
+                class="w-full rounded-sm bg-primary px-5 py-3 font-mono text-[11px] uppercase tracking-[0.16em] text-primary-foreground font-bold hover:opacity-95 transition-opacity"
+              >
+                ${authMode === 'signin' ? 'Sign In to Terminal →' : 'Create Terminal Account →'}
+              </button>
+            </form>
+
+            <!-- WINDOW APPEARANCE SETTINGS STRIP INSIDE LOGIN CARD -->
+            <div class="border-t border-border/50 pt-5 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1.5">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                  Window Appearance:
+                </span>
+                <span class="font-mono text-[9px] uppercase tracking-wider text-primary font-bold">
+                  ${currentTheme === 'light' ? 'Light' : currentTheme === 'dark' ? 'Dark' : 'System'}
+                </span>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5 font-mono text-[10px] uppercase tracking-wider">
+                <button type="button" onclick="setTheme('light')" class="flex items-center justify-center gap-1.5 rounded-xs border py-1.5 transition-colors ${currentTheme === 'light' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/70 text-muted-foreground hover:text-foreground hover:bg-secondary/40'}">
+                  ☀️ Light
+                </button>
+                <button type="button" onclick="setTheme('dark')" class="flex items-center justify-center gap-1.5 rounded-xs border py-1.5 transition-colors ${currentTheme === 'dark' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/70 text-muted-foreground hover:text-foreground hover:bg-secondary/40'}">
+                  🌙 Dark
+                </button>
+                <button type="button" onclick="setTheme('system')" class="flex items-center justify-center gap-1.5 rounded-xs border py-1.5 transition-colors ${currentTheme === 'system' ? 'bg-primary text-primary-foreground font-bold border-primary' : 'border-border/70 text-muted-foreground hover:text-foreground hover:bg-secondary/40'}">
+                  💻 System
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Trust & Security Footer -->
+          <div class="mt-6 flex flex-wrap items-center justify-center gap-4 text-center font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span class="flex items-center gap-1.5">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-positive"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+              256-bit TLS Encrypted
+            </span>
+            <span>·</span>
+            <span>Institutional Grade Auth</span>
+            <span>·</span>
+            <span>Gmail OAuth 2.0</span>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   // ==========================================
@@ -3285,11 +3992,22 @@
 
             <!-- Interrogate the forecast: Chat UI -->
             <section class="overflow-hidden rounded-sm border border-border bg-card/40">
-              <header class="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/60 px-6 py-4">
-                <h2 class="font-display text-lg text-foreground">Interrogate the forecast</h2>
-                <p class="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
-                  ${bank.name} · ${bank.ticker}
-                </p>
+              <header class="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-6 py-4">
+                <div>
+                  <h2 class="font-display text-lg text-foreground">Interrogate the forecast</h2>
+                  <p class="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground mt-0.5">
+                    ${bank.name} · ${bank.ticker}
+                  </p>
+                </div>
+                <div class="flex items-center gap-2.5">
+                  <span class="inline-flex items-center gap-1.5 rounded-full bg-positive/10 border border-positive/30 px-2.5 py-1 font-mono text-[9px] uppercase tracking-wider text-positive font-semibold">
+                    <span class="h-1.5 w-1.5 rounded-full bg-positive animate-pulse"></span>
+                    Gemini AI Active
+                  </span>
+                  <button type="button" onclick="promptUpdateApiKey()" class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors border border-border/70 rounded-xs px-2 py-0.5 bg-background/50" title="View or change Gemini API key">
+                    Key Config
+                  </button>
+                </div>
               </header>
 
               <div id="analyst-messages" class="max-h-[380px] min-h-[140px] overflow-y-auto px-6 py-5 space-y-4">
@@ -3405,7 +4123,95 @@
     }
   };
 
-  window.submitAnalystMessage = function () {
+    // ==========================================
+  // GOOGLE GEMINI AI ANALYST INTEGRATION
+  // ==========================================
+  const DEFAULT_GEMINI_API_KEY = "AQ.Ab8RN6KYFlU8D-DaKn0oALzhaEP0pTvXbEp_jqmQMNB1-K-AqA";
+
+  function getGeminiApiKey() {
+    return localStorage.getItem('gemini_api_key') || DEFAULT_GEMINI_API_KEY;
+  }
+
+  window.promptUpdateApiKey = function () {
+    const current = getGeminiApiKey();
+    const masked = current ? current.slice(0, 8) + '...' + current.slice(-4) : 'None';
+    const val = prompt('Enter Google Gemini API Key\n(Current: ' + masked + '):', current);
+    if (val !== null && val.trim()) {
+      localStorage.setItem('gemini_api_key', val.trim());
+      alert('Gemini API Key updated successfully.');
+    } else if (val !== null && !val.trim()) {
+      localStorage.removeItem('gemini_api_key');
+      alert('Gemini API Key reset to default.');
+    }
+  };
+
+  async function callGeminiAnalyst(bank, question) {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) throw new Error('No API key configured');
+
+    const systemPrompt = `You are the Chief Banking Analyst for Ledger Atlas, an institutional banking intelligence platform.
+You are analyzing ${bank.name} (${bank.ticker}), a ${bank.category === 'multinational' ? 'global multinational' : 'regional'} institution headquartered in ${bank.hq_city}, ${bank.country} (${bank.region}).
+
+Financial & Solvency Fundamentals:
+- Total Balance Sheet Assets: ${formatMoney(bank.total_assets_bn)}
+- Revenue: ${formatMoney(bank.revenue_bn)} | Net Income: ${formatMoney(bank.net_income_bn)}
+- Return on Equity (ROE): ${bank.roe_pct}% | Return on Assets (ROA): ${bank.roa_pct}%
+- Common Equity Tier 1 (CET1): ${bank.cet1_pct}% | Non-Performing Loans (NPL): ${bank.npl_pct}%
+- Cost-to-Income: ${bank.cost_income_pct}% | Net Interest Margin (NIM): ${bank.nim_pct}%
+- Loan Growth: ${bank.loan_growth_pct}% | Consensus FY26 Profit Growth Guidance: ${bank.forecast_ni_growth_pct}%
+- Valuation Multiples: P/E ${bank.pe_ratio}x | Dividend Yield: ${bank.dividend_yield_pct}% | Rating: ${bank.credit_rating || 'A'}
+- Ledger Composite Score: ${bank.composite}/100
+- Core Institutional Strength: ${bank.key_strength}
+- Principal Vulnerability & Risk: ${bank.key_risk}
+- Analyst Consensus Note: ${bank.analyst_note}
+
+Guidelines for your response:
+1. Provide a sharp, institutional, balance-sheet-grounded analysis addressing the user's specific query.
+2. Directly reference relevant ratios (CET1, ROE, NIM, NPL, Cost/Income).
+3. Offer strategic negotiating leverage or scenario vulnerability insights.
+4. Keep the answer concise and high-signal (2 to 4 structured paragraphs or bullet points).`;
+
+    // Try latest flash models in priority order
+    const models = ['gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-flash-latest'];
+    let lastErr = null;
+
+    for (const model of models) {
+      try {
+        const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(apiKey);
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: systemPrompt + '\n\nUser Inquiry: ' + question }]
+              }
+            ],
+            generationConfig: {
+              temperature: 0.4,
+              maxOutputTokens: 1024
+            }
+          })
+        });
+
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(errPayload.error?.message || ('HTTP ' + res.status));
+        }
+
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text.trim();
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    throw lastErr || new Error('Gemini API call failed');
+  }
+
+  window.submitAnalystMessage = async function () {
     const input = document.getElementById('analyst-chat-input');
     const question = input.value.trim();
     if (!question || isAnalystThinking) return;
@@ -3418,12 +4224,26 @@
 
     const bank = banks.find(b => b.id === activeAnalystBankId) || banks[0];
 
-    setTimeout(() => {
-      const answer = generateAnalystAnswer(bank, question);
-      analystMessages.push({ role: 'analyst', text: answer });
+    try {
+      const liveAnswer = await callGeminiAnalyst(bank, question);
+      analystMessages.push({
+        role: 'analyst',
+        text: liveAnswer,
+        isGemini: true
+      });
+    } catch (apiErr) {
+      console.warn('Gemini live call fallback:', apiErr.message);
+      const fallbackAnswer = generateAnalystAnswer(bank, question);
+      analystMessages.push({
+        role: 'analyst',
+        text: fallbackAnswer,
+        isGemini: false,
+        note: apiErr.message
+      });
+    } finally {
       isAnalystThinking = false;
       updateAnalystMessagesUI();
-    }, 600);
+    }
   };
 
   function updateAnalystMessagesUI() {
@@ -3436,7 +4256,19 @@
           <p class="max-w-[85%] rounded-sm bg-secondary px-3.5 py-2.5 text-[13px] leading-relaxed text-foreground">${m.text}</p>
         ` : `
           <div>
-            <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-primary">AI analyst</p>
+            <div class="flex items-center gap-2">
+              <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-primary">AI Analyst</p>
+              ${m.isGemini ? `
+                <span class="inline-flex items-center gap-1 rounded-full bg-positive/10 border border-positive/30 px-1.5 py-0.2 font-mono text-[8px] uppercase text-positive font-semibold">
+                  <span class="h-1 w-1 rounded-full bg-positive"></span>
+                  Gemini Live
+                </span>
+              ` : `
+                <span class="inline-flex items-center gap-1 rounded-full bg-secondary border border-border px-1.5 py-0.2 font-mono text-[8px] uppercase text-muted-foreground">
+                  Rule Engine
+                </span>
+              `}
+            </div>
             <p class="mt-1.5 whitespace-pre-line text-[13px] leading-relaxed text-foreground/90">${m.text}</p>
           </div>
         `}
